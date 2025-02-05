@@ -6,6 +6,8 @@ use parent qw(Plack::Middleware);
 use Plack::Util::Accessor qw( content_type vary_user_agent);
 use Plack::Util;
 
+my $has_brotli = eval "require IO::Compress::Brotli; 1";
+
 sub prepare_app {
     my $self = shift;
     if (my $match_cts = $self->content_type) {
@@ -66,10 +68,15 @@ sub call {
                 return if $content_type ne 'text/html';
             }
 
+            my @encode_options = (
+                $has_brotli ? ('br') : (),
+                qw/ gzip deflate identity /
+            );
+            
             # TODO check quality
             my $encoding = 'identity';
             if (defined $env->{HTTP_ACCEPT_ENCODING}) {
-                for my $enc (qw(gzip deflate identity)) {
+                for my $enc (@encode_options) {
                     if ($env->{HTTP_ACCEPT_ENCODING} =~ /\b$enc\b/) {
                         $encoding = $enc;
                         last;
@@ -78,7 +85,9 @@ sub call {
             }
 
             my $encoder;
-            if ($encoding eq 'gzip' || $encoding eq 'deflate') {
+            if ($encoding eq 'br') {
+                $encoder = Plack::Middleware::Deflater::Encoder::Brotli->new;
+            } elsif ($encoding eq 'gzip' || $encoding eq 'deflate') {
                 $encoder = Plack::Middleware::Deflater::Encoder->new($encoding);
             }
 
@@ -172,6 +181,45 @@ sub close : method {
 sub closed {
     $_[0]->{closed};
 }
+
+1;
+
+
+
+package Plack::Middleware::Deflater::Encoder::Brotli;
+
+use strict;
+use warnings;
+use IO::Compress::Brotli; # XXX add logic to check if module installed
+
+our @ISA = qw/ Plack::Middleware::Deflater::Encoder /;
+
+sub new {
+    my $class = shift;
+
+    bless {
+        encoder => IO::Compress::Brotli->create,
+        closed  => 0,
+    }, $class;
+}
+
+sub print : method {
+    my $self = shift;
+
+    return if $self->{closed};
+
+    my $chunk = shift;
+    if (!defined $chunk) {
+        my $buf = $self->{encoder}->finish;
+        $self->{closed} = 1;
+        return $buf;
+    }
+
+    my $buf = $self->{encoder}->compress($chunk);
+    return length $buf ? $buf : '';
+}
+
+
 
 1;
 
